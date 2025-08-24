@@ -51,6 +51,20 @@ ghi push 42
 # Updated issue #42 from issues/42.md
 ```
 
+### Show differences
+
+Compare a local issue file with the remote GitHub issue:
+
+```bash
+ghi diff 42
+# Shows differences between issues/42.md and GitHub issue #42
+```
+
+The diff shows:
+- Title changes (if any)
+- Body content differences in unified diff format
+- Uses color output for better readability (green for additions, red for deletions)
+
 ## File Format
 
 Issues are stored as markdown files with YAML frontmatter:

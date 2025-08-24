@@ -34,9 +34,17 @@ var pushCmd = &cobra.Command{
 	RunE:  runPush,
 }
 
+var diffCmd = &cobra.Command{
+	Use:   "diff <issue-number> [--] [EXTRA_GIT_DIFF_ARGS...]",
+	Short: "Compare local issues/{n}.md with remote GitHub Issue",
+	Args:  cobra.MinimumNArgs(1),
+	RunE:  runDiff,
+}
+
 func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(pushCmd)
+	rootCmd.AddCommand(diffCmd)
 }
 
 func main() {
@@ -123,4 +131,83 @@ func runPush(cmd *cobra.Command, args []string) error {
 	
 	fmt.Printf("Updated issue #%s from %s\n", issueNumber, filePath)
 	return nil
+}
+
+func runDiff(cmd *cobra.Command, args []string) error {
+	issueNumber := args[0]
+	
+	if !model.IsNumeric(issueNumber) {
+		return model.NewUsageError("Usage: ghi diff <issue-number> [--] [EXTRA_GIT_DIFF_ARGS...]")
+	}
+	
+	localPath := filepath.Join(issuesDir, fmt.Sprintf("%s.md", issueNumber))
+	
+	if _, err := os.Stat(localPath); err != nil {
+		if os.IsNotExist(err) {
+			return model.NewIOError(fmt.Sprintf("%s not found. Run 'ghi pull %s' first.", localPath, issueNumber), nil)
+		}
+		return model.NewIOError("failed to check local file", err)
+	}
+	
+	issue, err := gh.ViewIssue(issueNumber)
+	if err != nil {
+		return model.NewEnvError("", err)
+	}
+	
+	tmpDir := filepath.Join(issuesDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return model.NewIOError("failed to create temp directory", err)
+	}
+	
+	tmpFile, err := os.CreateTemp(tmpDir, fmt.Sprintf("remote-%s-*.md", issueNumber))
+	if err != nil {
+		return model.NewIOError("failed to create temp file", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	
+	fm := model.Frontmatter{Title: issue.Title}
+	content, err := filefmt.EncodeMarkdown(fm, []byte(issue.Body))
+	if err != nil {
+		tmpFile.Close()
+		return model.NewIOError("failed to encode remote markdown", err)
+	}
+	
+	if _, err := tmpFile.Write(content); err != nil {
+		tmpFile.Close()
+		return model.NewIOError("failed to write temp file", err)
+	}
+	
+	if err := tmpFile.Close(); err != nil {
+		return model.NewIOError("failed to close temp file", err)
+	}
+	
+	extraArgs := args[1:]
+	dashIndex := -1
+	for i, arg := range extraArgs {
+		if arg == "--" {
+			dashIndex = i
+			break
+		}
+	}
+	
+	if dashIndex >= 0 {
+		extraArgs = extraArgs[dashIndex+1:]
+	}
+	
+	exitCode, err := gh.RunGitDiff(tmpPath, localPath, extraArgs)
+	if err != nil {
+		return model.NewEnvError("", err)
+	}
+	
+	switch exitCode {
+	case 0:
+		fmt.Printf("No differences: %s matches remote.\n", localPath)
+		return nil
+	case 1:
+		os.Exit(1)
+		return nil
+	default:
+		return model.NewEnvError(fmt.Sprintf("git diff failed with exit code %d", exitCode), nil)
+	}
 }

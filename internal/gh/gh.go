@@ -23,6 +23,14 @@ func checkGHAvailable() error {
 	return nil
 }
 
+func checkGitAvailable() error {
+	_, err := exec.LookPath("git")
+	if err != nil {
+		return fmt.Errorf("git not found")
+	}
+	return nil
+}
+
 func ViewIssue(issueNumber string) (*model.IssueData, error) {
 	if err := checkGHAvailable(); err != nil {
 		return nil, err
@@ -106,4 +114,31 @@ func CreateTempBodyFile(body []byte) (string, error) {
 	}
 	
 	return tmp.Name(), nil
+}
+
+func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
+	if err := checkGitAvailable(); err != nil {
+		return 2, err
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	
+	args := []string{"--no-pager", "diff", "--no-index", "--exit-code"}
+	args = append(args, extraArgs...)
+	args = append(args, "--", localPath, remotePath)
+	
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	err := cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), nil
+		}
+		return 2, fmt.Errorf("git diff failed: %w", err)
+	}
+	
+	return 0, nil
 }
