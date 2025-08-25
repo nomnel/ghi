@@ -41,10 +41,18 @@ var diffCmd = &cobra.Command{
 	RunE:  runDiff,
 }
 
+var createCmd = &cobra.Command{
+	Use:   "create <issue-title>",
+	Short: "Create a new GitHub Issue and pull it locally",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCreate,
+}
+
 func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(diffCmd)
+	rootCmd.AddCommand(createCmd)
 }
 
 func main() {
@@ -210,4 +218,47 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	default:
 		return model.NewEnvError(fmt.Sprintf("git diff failed with exit code %d", exitCode), nil)
 	}
+}
+
+func runCreate(cmd *cobra.Command, args []string) error {
+	title := strings.TrimSpace(args[0])
+	
+	if title == "" {
+		return model.NewUsageError("Usage: ghi create <issue-title>")
+	}
+	
+	issueNumber, err := gh.CreateIssue(title)
+	if err != nil {
+		return model.NewEnvError("", err)
+	}
+	
+	if err := os.MkdirAll(issuesDir, 0o755); err != nil {
+		return model.NewIOError(fmt.Sprintf("Issue #%d created on GitHub but failed to create local directory", issueNumber), err)
+	}
+	
+	issue, err := gh.ViewIssue(fmt.Sprintf("%d", issueNumber))
+	if err != nil {
+		return model.NewIOError(fmt.Sprintf("Issue #%d created on GitHub but failed to fetch details", issueNumber), err)
+	}
+	
+	fm := model.Frontmatter{Title: issue.Title}
+	
+	content, err := filefmt.EncodeMarkdown(fm, []byte(issue.Body))
+	if err != nil {
+		return model.NewIOError(fmt.Sprintf("Issue #%d created on GitHub but failed to encode markdown", issueNumber), err)
+	}
+	
+	filePath := filepath.Join(issuesDir, fmt.Sprintf("%d.md", issueNumber))
+	
+	if err := filefmt.AtomicWriteFile(filePath, content, 0o644); err != nil {
+		return model.NewIOError(fmt.Sprintf("Issue #%d created on GitHub but failed to write local file", issueNumber), err)
+	}
+	
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return model.NewIOError(fmt.Sprintf("Issue #%d created and saved locally but failed to resolve absolute path", issueNumber), err)
+	}
+	
+	fmt.Println(absPath)
+	return nil
 }

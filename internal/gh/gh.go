@@ -142,3 +142,84 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 	
 	return 0, nil
 }
+
+func GetRepositoryInfo() (owner string, repo string, err error) {
+	if err := checkGHAvailable(); err != nil {
+		return "", "", err
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	
+	cmd := exec.CommandContext(ctx, "gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
+			return "", "", fmt.Errorf("gh CLI error: ensure you're authenticated ('gh auth login') and running inside a GitHub repo")
+		}
+		if strings.Contains(stderrStr, "not a git repository") || strings.Contains(stderrStr, "not found") {
+			return "", "", fmt.Errorf("gh CLI error: ensure you're authenticated ('gh auth login') and running inside a GitHub repo")
+		}
+		return "", "", fmt.Errorf("gh error: %s", stderrStr)
+	}
+	
+	nameWithOwner := strings.TrimSpace(stdout.String())
+	parts := strings.Split(nameWithOwner, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("unexpected repository format: %s", nameWithOwner)
+	}
+	
+	return parts[0], parts[1], nil
+}
+
+type CreateIssueResponse struct {
+	Number int `json:"number"`
+}
+
+func CreateIssue(title string) (int, error) {
+	if err := checkGHAvailable(); err != nil {
+		return 0, err
+	}
+	
+	owner, repo, err := GetRepositoryInfo()
+	if err != nil {
+		return 0, err
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	
+	apiPath := fmt.Sprintf("repos/%s/%s/issues", owner, repo)
+	cmd := exec.CommandContext(ctx, "gh", "api", "--method", "POST",
+		"-H", "Accept: application/vnd.github+json",
+		apiPath,
+		"-f", "title="+title)
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
+			return 0, fmt.Errorf("gh error: ensure you're authenticated ('gh auth login') and running inside a GitHub repo")
+		}
+		return 0, fmt.Errorf("gh api error: %s", stderrStr)
+	}
+	
+	var response CreateIssueResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return 0, fmt.Errorf("failed to parse API response: %w", err)
+	}
+	
+	if response.Number == 0 {
+		return 0, fmt.Errorf("API response missing issue number")
+	}
+	
+	return response.Number, nil
+}
