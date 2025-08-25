@@ -48,11 +48,27 @@ var createCmd = &cobra.Command{
 	RunE:  runCreate,
 }
 
+var closeCmd = &cobra.Command{
+	Use:   "close <issue-number>",
+	Short: "Close the specified GitHub issue",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runClose,
+}
+
+var reopenCmd = &cobra.Command{
+	Use:   "reopen <issue-number>",
+	Short: "Reopen the specified GitHub issue",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReopen,
+}
+
 func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(createCmd)
+	rootCmd.AddCommand(closeCmd)
+	rootCmd.AddCommand(reopenCmd)
 }
 
 func main() {
@@ -260,5 +276,33 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 	
 	fmt.Println(absPath)
+	return nil
+}
+
+func runClose(cmd *cobra.Command, args []string) error {
+	issueNumber := args[0]
+	
+	if !model.IsNumeric(issueNumber) {
+		return model.NewUsageError("Usage: ghi close <issue-number>")
+	}
+	
+	if err := gh.CloseIssue(issueNumber); err != nil {
+		return model.NewEnvError("", err)
+	}
+	
+	return nil
+}
+
+func runReopen(cmd *cobra.Command, args []string) error {
+	issueNumber := args[0]
+	
+	if !model.IsNumeric(issueNumber) {
+		return model.NewUsageError("Usage: ghi reopen <issue-number>")
+	}
+	
+	if err := gh.ReopenIssue(issueNumber); err != nil {
+		return model.NewEnvError("", err)
+	}
+	
 	return nil
 }

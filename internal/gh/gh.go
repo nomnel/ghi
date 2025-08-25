@@ -223,3 +223,85 @@ func CreateIssue(title string) (int, error) {
 	
 	return response.Number, nil
 }
+
+func CloseIssue(issueNumber string) error {
+	if err := checkGHAvailable(); err != nil {
+		return err
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	
+	cmd := exec.CommandContext(ctx, "gh", "issue", "close", issueNumber)
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
+			return fmt.Errorf("gh error: ensure you're authenticated ('gh auth login') and running inside a GitHub repo")
+		}
+		if strings.Contains(stderrStr, "not found") || strings.Contains(stderrStr, "404") {
+			return fmt.Errorf("gh error: issue not found or repo not set")
+		}
+		if strings.Contains(stderrStr, "permission") || strings.Contains(stderrStr, "forbidden") {
+			return fmt.Errorf("gh error: permission denied")
+		}
+		return fmt.Errorf("gh error: %s", stderrStr)
+	}
+	
+	// Check if gh printed output - if not, we'll print our own success message
+	if stdoutStr := strings.TrimSpace(stdout.String()); stdoutStr != "" {
+		fmt.Print(stdoutStr)
+		if !strings.HasSuffix(stdoutStr, "\n") {
+			fmt.Println()
+		}
+	} else {
+		fmt.Printf("Closed issue #%s.\n", issueNumber)
+	}
+	
+	return nil
+}
+
+func ReopenIssue(issueNumber string) error {
+	if err := checkGHAvailable(); err != nil {
+		return err
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	
+	cmd := exec.CommandContext(ctx, "gh", "issue", "reopen", issueNumber)
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
+			return fmt.Errorf("gh error: ensure you're authenticated ('gh auth login') and running inside a GitHub repo")
+		}
+		if strings.Contains(stderrStr, "not found") || strings.Contains(stderrStr, "404") {
+			return fmt.Errorf("gh error: issue not found or repo not set")
+		}
+		if strings.Contains(stderrStr, "permission") || strings.Contains(stderrStr, "forbidden") {
+			return fmt.Errorf("gh error: permission denied")
+		}
+		return fmt.Errorf("gh error: %s", stderrStr)
+	}
+	
+	// Check if gh printed output - if not, we'll print our own success message
+	if stdoutStr := strings.TrimSpace(stdout.String()); stdoutStr != "" {
+		fmt.Print(stdoutStr)
+		if !strings.HasSuffix(stdoutStr, "\n") {
+			fmt.Println()
+		}
+	} else {
+		fmt.Printf("Reopened issue #%s.\n", issueNumber)
+	}
+	
+	return nil
+}

@@ -6,6 +6,7 @@ A simple Go CLI tool to sync GitHub Issues with local markdown files, enabling o
 
 - **Pull issues**: Download GitHub issues to local markdown files with YAML frontmatter
 - **Push changes**: Update GitHub issues from edited local files
+- **Close/Reopen issues**: Change issue state directly from the command line
 - **Simple format**: Clean markdown files with YAML frontmatter for metadata
 - **Atomic operations**: Safe file writes with atomic operations
 - **GitHub CLI integration**: Uses the authenticated `gh` CLI for all GitHub operations
@@ -64,6 +65,24 @@ The diff shows:
 - Title changes (if any)
 - Body content differences in unified diff format
 - Uses color output for better readability (green for additions, red for deletions)
+
+### Close an issue
+
+Close a GitHub issue:
+
+```bash
+ghi close 42
+# Closed issue #42.
+```
+
+### Reopen an issue
+
+Reopen a closed GitHub issue:
+
+```bash
+ghi reopen 42
+# Reopened issue #42.
+```
 
 ## File Format
 
