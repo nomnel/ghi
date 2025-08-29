@@ -6,6 +6,7 @@ A simple Go CLI tool to sync GitHub Issues with local markdown files, enabling o
 
 - **Pull issues**: Download GitHub issues to local markdown files with YAML frontmatter
 - **Push changes**: Update GitHub issues from edited local files
+- **List issues**: Display GitHub issues with custom formatting and filtering options
 - **Close/Reopen issues**: Change issue state directly from the command line
 - **Simple format**: Clean markdown files with YAML frontmatter for metadata
 - **Atomic operations**: Safe file writes with atomic operations
@@ -65,6 +66,32 @@ The diff shows:
 - Title changes (if any)
 - Body content differences in unified diff format
 - Uses color output for better readability (green for additions, red for deletions)
+
+### List issues
+
+Display GitHub issues with custom formatting:
+
+```bash
+# List all open issues (default)
+ghi list
+
+# List closed issues
+ghi list -- --state closed
+
+# List issues assigned to you
+ghi list -- --assignee @me
+
+# Limit to 5 issues with specific label
+ghi list -- --limit 5 --label bug
+
+# Search for issues mentioning "performance"
+ghi list -- --search performance
+```
+
+The list command:
+- Shows issues in a clean format: issue number, title, and URL
+- Supports all `gh issue list` filtering options via pass-through after `--`
+- Displays blank lines between issues for better readability
 
 ### Close an issue
 
