@@ -305,3 +305,44 @@ func ReopenIssue(issueNumber string) error {
 	
 	return nil
 }
+
+func ListIssues(extraArgs []string) ([]model.IssueListItem, error) {
+	if err := checkGHAvailable(); err != nil {
+		return nil, err
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	
+	args := []string{"issue", "list", "--json", "number,title,url"}
+	args = append(args, extraArgs...)
+	
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		// Check for invalid options/flags first (these typically come with exit code 1)
+		if strings.Contains(stderrStr, "unknown flag") || strings.Contains(stderrStr, "invalid") {
+			// Return just the error message for usage errors
+			return nil, fmt.Errorf("%s", stderrStr)
+		}
+		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
+			return nil, fmt.Errorf("gh error: ensure you're authenticated ('gh auth login') and running inside a GitHub repo")
+		}
+		if strings.Contains(stderrStr, "not found") || strings.Contains(stderrStr, "repository") {
+			return nil, fmt.Errorf("gh error: repository not found or not set")
+		}
+		return nil, fmt.Errorf("gh error: %s", stderrStr)
+	}
+	
+	var issues []model.IssueListItem
+	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
+		return nil, fmt.Errorf("failed to parse gh output: %w", err)
+	}
+	
+	return issues, nil
+}

@@ -55,6 +55,12 @@ type IssueData struct {
 	Body  string `json:"body"`
 }
 
+type IssueListItem struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+}
+
 var (
 	ErrMissingFile        = errors.New("file not found")
 	ErrMalformedFrontmatter = errors.New("malformed frontmatter")

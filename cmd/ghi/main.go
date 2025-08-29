@@ -62,6 +62,14 @@ var reopenCmd = &cobra.Command{
 	RunE:  runReopen,
 }
 
+var listCmd = &cobra.Command{
+	Use:   "list [-- GH_ISSUE_LIST_OPTIONS...]",
+	Short: "List open GitHub Issues with custom formatting",
+	Args:  cobra.ArbitraryArgs,
+	DisableFlagParsing: true,
+	RunE:  runList,
+}
+
 func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(pushCmd)
@@ -69,6 +77,7 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(closeCmd)
 	rootCmd.AddCommand(reopenCmd)
+	rootCmd.AddCommand(listCmd)
 }
 
 func main() {
@@ -302,6 +311,44 @@ func runReopen(cmd *cobra.Command, args []string) error {
 	
 	if err := gh.ReopenIssue(issueNumber); err != nil {
 		return model.NewEnvError("", err)
+	}
+	
+	return nil
+}
+
+func runList(cmd *cobra.Command, args []string) error {
+	// Find the "--" separator if present
+	extraArgs := []string{}
+	dashIndex := -1
+	for i, arg := range args {
+		if arg == "--" {
+			dashIndex = i
+			break
+		}
+	}
+	
+	// Everything after "--" is passed to gh
+	if dashIndex >= 0 {
+		extraArgs = args[dashIndex+1:]
+	}
+	
+	issues, err := gh.ListIssues(extraArgs)
+	if err != nil {
+		// Check if it's an invalid option error from gh
+		if strings.Contains(err.Error(), "unknown flag") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unrecognized") {
+			return model.NewUsageError(err.Error())
+		}
+		return model.NewEnvError("", err)
+	}
+	
+	// Format and output issues
+	for i, issue := range issues {
+		fmt.Printf("#%d %s\n", issue.Number, issue.Title)
+		fmt.Println(issue.URL)
+		// Add blank line between issues, but not after the last one
+		if i < len(issues)-1 {
+			fmt.Println()
+		}
 	}
 	
 	return nil
