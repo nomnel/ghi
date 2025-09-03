@@ -70,6 +70,13 @@ var listCmd = &cobra.Command{
 	RunE:  runList,
 }
 
+var pruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: "Delete local files for closed GitHub issues",
+	Args:  cobra.NoArgs,
+	RunE:  runPrune,
+}
+
 func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(pushCmd)
@@ -78,6 +85,7 @@ func init() {
 	rootCmd.AddCommand(closeCmd)
 	rootCmd.AddCommand(reopenCmd)
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(pruneCmd)
 }
 
 func main() {
@@ -351,5 +359,47 @@ func runList(cmd *cobra.Command, args []string) error {
 		}
 	}
 	
+	return nil
+}
+
+func runPrune(cmd *cobra.Command, args []string) error {
+	// Check if issues directory exists
+	if _, err := os.Stat(issuesDir); os.IsNotExist(err) {
+		return model.NewIOError("issues directory does not exist", nil)
+	}
+	
+	// Get list of closed issues from GitHub
+	closedIssues, err := gh.ListClosedIssues()
+	if err != nil {
+		return model.NewEnvError("failed to list closed issues", err)
+	}
+	
+	// If no closed issues, exit silently with success
+	if len(closedIssues) == 0 {
+		return nil
+	}
+	
+	// Delete files for each closed issue
+	for _, issue := range closedIssues {
+		filePath := filepath.Join(issuesDir, fmt.Sprintf("%d.md", issue.Number))
+		
+		// Check if file exists before attempting deletion
+		if _, err := os.Stat(filePath); err == nil {
+			if err := os.Remove(filePath); err != nil {
+				return model.NewIOError(fmt.Sprintf("failed to delete %s", filePath), err)
+			}
+		}
+		// If file doesn't exist, continue silently
+	}
+	
+	// Delete tmp directory if it exists
+	tmpDir := filepath.Join(issuesDir, "tmp")
+	if _, err := os.Stat(tmpDir); err == nil {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			return model.NewIOError("failed to delete tmp directory", err)
+		}
+	}
+	
+	// Silent exit on success
 	return nil
 }

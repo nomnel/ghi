@@ -8,6 +8,7 @@ A simple Go CLI tool to sync GitHub Issues with local markdown files, enabling o
 - **Push changes**: Update GitHub issues from edited local files
 - **List issues**: Display GitHub issues with custom formatting and filtering options
 - **Close/Reopen issues**: Change issue state directly from the command line
+- **Prune local files**: Remove local files for closed GitHub issues
 - **Simple format**: Clean markdown files with YAML frontmatter for metadata
 - **Atomic operations**: Safe file writes with atomic operations
 - **GitHub CLI integration**: Uses the authenticated `gh` CLI for all GitHub operations
@@ -110,6 +111,23 @@ Reopen a closed GitHub issue:
 ghi reopen 42
 # Reopened issue #42.
 ```
+
+### Prune closed issues
+
+Delete local files for closed GitHub issues:
+
+```bash
+ghi prune
+# Deletes all local files corresponding to closed issues
+# Also removes the issues/tmp/ directory if it exists
+```
+
+The prune command:
+- Retrieves all closed issues from GitHub
+- Deletes local markdown files for those closed issues
+- Removes the `issues/tmp/` directory if present
+- Operates silently on success (no output)
+- Requires the `issues/` directory to exist
 
 ## File Format
 

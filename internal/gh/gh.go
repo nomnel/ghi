@@ -346,3 +346,7 @@ func ListIssues(extraArgs []string) ([]model.IssueListItem, error) {
 	
 	return issues, nil
 }
+
+func ListClosedIssues() ([]model.IssueListItem, error) {
+	return ListIssues([]string{"--state", "closed"})
+}
