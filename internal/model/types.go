@@ -8,7 +8,7 @@ import (
 
 type Frontmatter struct {
 	Title  string `yaml:"title,omitempty"`
-	Parent *int   `yaml:"parent,omitempty"`
+	Parent string `yaml:"parent,omitempty"`
 }
 
 type ErrorType int

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/nomnel/ghi/internal/filefmt"
@@ -105,8 +106,7 @@ func main() {
 func issueFrontmatter(issue *model.IssueData) model.Frontmatter {
 	fm := model.Frontmatter{Title: issue.Title}
 	if issue.Parent != nil {
-		parentNumber := issue.Parent.Number
-		fm.Parent = &parentNumber
+		fm.Parent = strconv.Itoa(issue.Parent.Number)
 	}
 
 	return fm
