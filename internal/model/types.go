@@ -7,7 +7,8 @@ import (
 )
 
 type Frontmatter struct {
-	Title string `yaml:"title,omitempty"`
+	Title  string `yaml:"title,omitempty"`
+	Parent *int   `yaml:"parent,omitempty"`
 }
 
 type ErrorType int
@@ -51,8 +52,13 @@ func IsNumeric(s string) bool {
 }
 
 type IssueData struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title  string       `json:"title"`
+	Body   string       `json:"body"`
+	Parent *IssueParent `json:"parent"`
+}
+
+type IssueParent struct {
+	Number int `json:"number"`
 }
 
 type IssueListItem struct {
@@ -62,6 +68,6 @@ type IssueListItem struct {
 }
 
 var (
-	ErrMissingFile        = errors.New("file not found")
+	ErrMissingFile          = errors.New("file not found")
 	ErrMalformedFrontmatter = errors.New("malformed frontmatter")
 )

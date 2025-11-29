@@ -35,16 +35,37 @@ func ViewIssue(issueNumber string) (*model.IssueData, error) {
 	if err := checkGHAvailable(); err != nil {
 		return nil, err
 	}
-	
+
+	owner, repo, err := GetRepositoryInfo()
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
-	cmd := exec.CommandContext(ctx, "gh", "issue", "view", issueNumber, "--json", "title,body")
-	
+
+	query := `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      title
+      body
+      parent { number }
+    }
+  }
+}`
+
+	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
+		"-H", "GraphQL-Features: sub_issues",
+		"-f", "query="+query,
+		"-f", "owner="+owner,
+		"-f", "name="+repo,
+		"-f", "number="+issueNumber,
+	)
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
@@ -55,36 +76,77 @@ func ViewIssue(issueNumber string) (*model.IssueData, error) {
 		}
 		return nil, fmt.Errorf("gh error: %s", stderrStr)
 	}
-	
-	var issue model.IssueData
-	if err := json.Unmarshal(stdout.Bytes(), &issue); err != nil {
+
+	var response struct {
+		Data struct {
+			Repository struct {
+				Issue *model.IssueData `json:"issue"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return nil, fmt.Errorf("failed to parse gh output: %w", err)
 	}
-	
-	return &issue, nil
+
+	if len(response.Errors) > 0 && response.Data.Repository.Issue == nil {
+		var messages []string
+		for _, e := range response.Errors {
+			if e.Message != "" {
+				messages = append(messages, e.Message)
+			}
+		}
+		errMsg := strings.Join(messages, "; ")
+		if strings.Contains(errMsg, "Could not resolve to an Issue") {
+			return nil, fmt.Errorf("gh error: issue not found or repo not set. Authenticate with 'gh auth login' and run inside a repo")
+		}
+		return nil, fmt.Errorf("gh error: %s", errMsg)
+	}
+
+	issue := response.Data.Repository.Issue
+	if issue == nil {
+		return nil, fmt.Errorf("gh error: issue not found or repo not set. Authenticate with 'gh auth login' and run inside a repo")
+	}
+
+	if len(response.Errors) > 0 {
+		var messages []string
+		for _, e := range response.Errors {
+			if e.Message != "" {
+				messages = append(messages, e.Message)
+			}
+		}
+		if len(messages) > 0 {
+			fmt.Fprintf(os.Stderr, "warning: partial GraphQL response: %s\n", strings.Join(messages, "; "))
+		}
+	}
+
+	return issue, nil
 }
 
 func EditIssue(issueNumber string, title string, bodyFile string) error {
 	if err := checkGHAvailable(); err != nil {
 		return err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	args := []string{"issue", "edit", issueNumber}
-	
+
 	if title != "" && strings.TrimSpace(title) != "" {
 		args = append(args, "--title", title)
 	}
-	
+
 	args = append(args, "--body-file", bodyFile)
-	
+
 	cmd := exec.CommandContext(ctx, "gh", args...)
-	
+
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
@@ -92,7 +154,7 @@ func EditIssue(issueNumber string, title string, bodyFile string) error {
 		}
 		return fmt.Errorf("gh error: %s", stderrStr)
 	}
-	
+
 	return nil
 }
 
@@ -101,18 +163,18 @@ func CreateTempBodyFile(body []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	
+
 	if _, err := tmp.Write(body); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", fmt.Errorf("failed to write body to temp file: %w", err)
 	}
-	
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmp.Name())
 		return "", fmt.Errorf("failed to close temp file: %w", err)
 	}
-	
+
 	return tmp.Name(), nil
 }
 
@@ -120,18 +182,18 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 	if err := checkGitAvailable(); err != nil {
 		return 2, err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	args := []string{"--no-pager", "diff", "--no-index", "--exit-code"}
 	args = append(args, extraArgs...)
 	args = append(args, "--", localPath, remotePath)
-	
+
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	err := cmd.Run()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -139,7 +201,7 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 		}
 		return 2, fmt.Errorf("git diff failed: %w", err)
 	}
-	
+
 	return 0, nil
 }
 
@@ -147,16 +209,16 @@ func GetRepositoryInfo() (owner string, repo string, err error) {
 	if err := checkGHAvailable(); err != nil {
 		return "", "", err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	cmd := exec.CommandContext(ctx, "gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
@@ -167,13 +229,13 @@ func GetRepositoryInfo() (owner string, repo string, err error) {
 		}
 		return "", "", fmt.Errorf("gh error: %s", stderrStr)
 	}
-	
+
 	nameWithOwner := strings.TrimSpace(stdout.String())
 	parts := strings.Split(nameWithOwner, "/")
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("unexpected repository format: %s", nameWithOwner)
 	}
-	
+
 	return parts[0], parts[1], nil
 }
 
@@ -185,25 +247,25 @@ func CreateIssue(title string) (int, error) {
 	if err := checkGHAvailable(); err != nil {
 		return 0, err
 	}
-	
+
 	owner, repo, err := GetRepositoryInfo()
 	if err != nil {
 		return 0, err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	apiPath := fmt.Sprintf("repos/%s/%s/issues", owner, repo)
 	cmd := exec.CommandContext(ctx, "gh", "api", "--method", "POST",
 		"-H", "Accept: application/vnd.github+json",
 		apiPath,
 		"-f", "title="+title)
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
@@ -211,16 +273,16 @@ func CreateIssue(title string) (int, error) {
 		}
 		return 0, fmt.Errorf("gh api error: %s", stderrStr)
 	}
-	
+
 	var response CreateIssueResponse
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return 0, fmt.Errorf("failed to parse API response: %w", err)
 	}
-	
+
 	if response.Number == 0 {
 		return 0, fmt.Errorf("API response missing issue number")
 	}
-	
+
 	return response.Number, nil
 }
 
@@ -228,16 +290,16 @@ func CloseIssue(issueNumber string) error {
 	if err := checkGHAvailable(); err != nil {
 		return err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	cmd := exec.CommandContext(ctx, "gh", "issue", "close", issueNumber)
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
@@ -251,7 +313,7 @@ func CloseIssue(issueNumber string) error {
 		}
 		return fmt.Errorf("gh error: %s", stderrStr)
 	}
-	
+
 	// Check if gh printed output - if not, we'll print our own success message
 	if stdoutStr := strings.TrimSpace(stdout.String()); stdoutStr != "" {
 		fmt.Print(stdoutStr)
@@ -261,7 +323,7 @@ func CloseIssue(issueNumber string) error {
 	} else {
 		fmt.Printf("Closed issue #%s.\n", issueNumber)
 	}
-	
+
 	return nil
 }
 
@@ -269,16 +331,16 @@ func ReopenIssue(issueNumber string) error {
 	if err := checkGHAvailable(); err != nil {
 		return err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	cmd := exec.CommandContext(ctx, "gh", "issue", "reopen", issueNumber)
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "auth") {
@@ -292,7 +354,7 @@ func ReopenIssue(issueNumber string) error {
 		}
 		return fmt.Errorf("gh error: %s", stderrStr)
 	}
-	
+
 	// Check if gh printed output - if not, we'll print our own success message
 	if stdoutStr := strings.TrimSpace(stdout.String()); stdoutStr != "" {
 		fmt.Print(stdoutStr)
@@ -302,7 +364,7 @@ func ReopenIssue(issueNumber string) error {
 	} else {
 		fmt.Printf("Reopened issue #%s.\n", issueNumber)
 	}
-	
+
 	return nil
 }
 
@@ -310,19 +372,19 @@ func ListIssues(extraArgs []string) ([]model.IssueListItem, error) {
 	if err := checkGHAvailable(); err != nil {
 		return nil, err
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	
+
 	args := []string{"issue", "list", "--json", "number,title,url"}
 	args = append(args, extraArgs...)
-	
+
 	cmd := exec.CommandContext(ctx, "gh", args...)
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		// Check for invalid options/flags first (these typically come with exit code 1)
@@ -338,12 +400,12 @@ func ListIssues(extraArgs []string) ([]model.IssueListItem, error) {
 		}
 		return nil, fmt.Errorf("gh error: %s", stderrStr)
 	}
-	
+
 	var issues []model.IssueListItem
 	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
 		return nil, fmt.Errorf("failed to parse gh output: %w", err)
 	}
-	
+
 	return issues, nil
 }
 

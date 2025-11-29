@@ -140,6 +140,16 @@ title: Issue title here
 Issue body content here...
 ```
 
+When the GitHub issue has a parent, the frontmatter includes it while keeping the same key order:
+
+```markdown
+---
+title: Child issue title
+parent: 42
+---
+Issue body content here...
+```
+
 ## Directory Structure
 
 - Issues are stored in the `issues/` directory (created automatically)
