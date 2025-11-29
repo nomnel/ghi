@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,23 @@ import (
 )
 
 const commandTimeout = 30 * time.Second
+
+type ghRunnerFunc func(ctx context.Context, args []string) (stdout string, stderr string, err error)
+
+var (
+	ghCommandRunner    ghRunnerFunc = defaultGhCommand
+	repositoryInfoFunc              = GetRepositoryInfo
+	checkGhAvailable                = checkGHAvailable
+)
+
+func defaultGhCommand(ctx context.Context, args []string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
 
 func checkGHAvailable() error {
 	_, err := exec.LookPath("gh")
@@ -36,31 +54,10 @@ func ViewIssue(issueNumber string) (*model.IssueData, error) {
 		return nil, err
 	}
 
-	owner, repo, err := GetRepositoryInfo()
-	if err != nil {
-		return nil, err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	query := `query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    issue(number: $number) {
-      title
-      body
-      parent { number }
-    }
-  }
-}`
-
-	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
-		"-H", "GraphQL-Features: sub_issues",
-		"-f", "query="+query,
-		"-f", "owner="+owner,
-		"-f", "name="+repo,
-		"-F", "number="+issueNumber,
-	)
+	cmd := exec.CommandContext(ctx, "gh", "issue", "view", issueNumber, "--json", "title,body")
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -77,53 +74,12 @@ func ViewIssue(issueNumber string) (*model.IssueData, error) {
 		return nil, fmt.Errorf("gh error: %s", stderrStr)
 	}
 
-	var response struct {
-		Data struct {
-			Repository struct {
-				Issue *model.IssueData `json:"issue"`
-			} `json:"repository"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+	var issue model.IssueData
+	if err := json.Unmarshal(stdout.Bytes(), &issue); err != nil {
 		return nil, fmt.Errorf("failed to parse gh output: %w", err)
 	}
 
-	if len(response.Errors) > 0 && response.Data.Repository.Issue == nil {
-		var messages []string
-		for _, e := range response.Errors {
-			if e.Message != "" {
-				messages = append(messages, e.Message)
-			}
-		}
-		errMsg := strings.Join(messages, "; ")
-		if strings.Contains(errMsg, "Could not resolve to an Issue") {
-			return nil, fmt.Errorf("gh error: issue not found or repo not set. Authenticate with 'gh auth login' and run inside a repo")
-		}
-		return nil, fmt.Errorf("gh error: %s", errMsg)
-	}
-
-	issue := response.Data.Repository.Issue
-	if issue == nil {
-		return nil, fmt.Errorf("gh error: issue not found or repo not set. Authenticate with 'gh auth login' and run inside a repo")
-	}
-
-	if len(response.Errors) > 0 {
-		var messages []string
-		for _, e := range response.Errors {
-			if e.Message != "" {
-				messages = append(messages, e.Message)
-			}
-		}
-		if len(messages) > 0 {
-			fmt.Fprintf(os.Stderr, "warning: partial GraphQL response: %s\n", strings.Join(messages, "; "))
-		}
-	}
-
-	return issue, nil
+	return &issue, nil
 }
 
 func EditIssue(issueNumber string, title string, bodyFile string) error {
@@ -206,7 +162,7 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 }
 
 func GetRepositoryInfo() (owner string, repo string, err error) {
-	if err := checkGHAvailable(); err != nil {
+	if err := checkGhAvailable(); err != nil {
 		return "", "", err
 	}
 
@@ -411,4 +367,92 @@ func ListIssues(extraArgs []string) ([]model.IssueListItem, error) {
 
 func ListClosedIssues() ([]model.IssueListItem, error) {
 	return ListIssues([]string{"--state", "closed"})
+}
+
+func GetIssueID(issueNumber string) (int64, error) {
+	if err := checkGhAvailable(); err != nil {
+		return 0, err
+	}
+
+	owner, repo, err := repositoryInfoFunc()
+	if err != nil {
+		return 0, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	apiPath := fmt.Sprintf("repos/%s/%s/issues/%s", owner, repo, issueNumber)
+	args := []string{
+		"api",
+		apiPath,
+		"--jq", ".id",
+		"-H", "Accept: application/vnd.github+json",
+		"-H", "X-GitHub-Api-Version: 2022-11-28",
+	}
+
+	stdout, stderr, err := ghCommandRunner(ctx, args)
+	if err != nil {
+		return 0, fmt.Errorf("gh api error: %s", strings.TrimSpace(stderr))
+	}
+
+	idStr := strings.TrimSpace(stdout)
+	if idStr == "" {
+		return 0, fmt.Errorf("gh api error: missing issue id")
+	}
+
+	issueID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("gh api error: invalid issue id %q", idStr)
+	}
+
+	return issueID, nil
+}
+
+func AddSubIssue(childNumber, parentNumber string) error {
+	if err := checkGhAvailable(); err != nil {
+		return err
+	}
+
+	owner, repo, err := repositoryInfoFunc()
+	if err != nil {
+		return err
+	}
+
+	childID, err := GetIssueID(childNumber)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	apiPath := fmt.Sprintf("repos/%s/%s/issues/%s/sub_issues", owner, repo, parentNumber)
+	args := []string{
+		"api",
+		"-X", "POST",
+		apiPath,
+		"-H", "Accept: application/vnd.github+json",
+		"-H", "X-GitHub-Api-Version: 2022-11-28",
+		"-f", fmt.Sprintf("sub_issue_id=%d", childID),
+	}
+
+	_, stderr, err := ghCommandRunner(ctx, args)
+	if err != nil {
+		stderrStr := strings.TrimSpace(stderr)
+		switch {
+		case strings.Contains(stderrStr, "404"):
+			return fmt.Errorf("gh api error: parent issue not found or sub-issues disabled: %s", stderrStr)
+		case strings.Contains(stderrStr, "422") || strings.Contains(stderrStr, "Validation Failed"):
+			return fmt.Errorf("gh api error: validation failed: %s", stderrStr)
+		case strings.Contains(stderrStr, "401") || strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "Requires authentication"):
+			return fmt.Errorf("gh api error: authentication required: %s", stderrStr)
+		case strings.Contains(stderrStr, "403") || strings.Contains(stderrStr, "forbidden") || strings.Contains(stderrStr, "permission"):
+			return fmt.Errorf("gh api error: permission denied: %s", stderrStr)
+		default:
+			return fmt.Errorf("gh api error: %s", stderrStr)
+		}
+	}
+
+	return nil
 }
