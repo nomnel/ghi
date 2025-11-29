@@ -59,7 +59,7 @@ func ViewIssue(issueNumber string) (*model.IssueData, error) {
 		"-f", "query="+query,
 		"-f", "owner="+owner,
 		"-f", "name="+repo,
-		"-f", "number="+issueNumber,
+		"-F", "number="+issueNumber,
 	)
 
 	var stdout, stderr bytes.Buffer
