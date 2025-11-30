@@ -109,6 +109,10 @@ func TestHelperProcess(t *testing.T) {
 	if len(cmdArgs) > 1 && cmdArgs[1] == "api" {
 		joined := strings.Join(cmdArgs, " ")
 		if strings.Contains(joined, "sub_issues") {
+			if !strings.Contains(joined, "sub_issue_id=") {
+				fmt.Fprint(os.Stderr, "missing sub_issue_id flag")
+				os.Exit(1)
+			}
 			status := os.Getenv("GH_HELPER_SUBISSUE_STATUS")
 			switch status {
 			case "404":

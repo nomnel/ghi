@@ -282,7 +282,7 @@ func AddSubIssue(childNumber, parentNumber string) error {
 		"-H", "Accept: application/vnd.github+json",
 		"-H", "X-GitHub-Api-Version: 2022-11-28",
 		apiPath,
-		"-f", "issue_id="+childID,
+		"-F", "sub_issue_id="+childID,
 	)
 
 	var stderr bytes.Buffer
