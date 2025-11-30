@@ -81,6 +81,35 @@ func TestAddSubIssueHTTPFailures(t *testing.T) {
 	}
 }
 
+func TestGetIssueIDHandlesErrors(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status string
+		match  string
+	}{
+		{name: "not found", status: "404", match: "not found"},
+		{name: "auth", status: "401", match: "authentication"},
+		{name: "missing id", status: "empty", match: "issue id missing"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			reset := stubGH(t)
+			defer reset()
+
+			t.Setenv("GH_HELPER_ISSUE_STATUS", tc.status)
+
+			_, err := GetIssueID("123")
+			if err == nil {
+				t.Fatalf("expected error for status %s, got nil", tc.status)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), tc.match) {
+				t.Fatalf("unexpected error message for %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -133,6 +162,19 @@ func TestHelperProcess(t *testing.T) {
 		}
 
 		if strings.Contains(joined, "--jq .id") {
+			status := os.Getenv("GH_HELPER_ISSUE_STATUS")
+			switch status {
+			case "404":
+				fmt.Fprint(os.Stderr, "HTTP 404: Not Found")
+				os.Exit(1)
+			case "401":
+				fmt.Fprint(os.Stderr, "HTTP 401: Unauthorized")
+				os.Exit(1)
+			case "empty":
+				fmt.Fprint(os.Stdout, "")
+				os.Exit(0)
+			}
+
 			id := os.Getenv("GH_HELPER_ISSUE_ID")
 			if id == "" {
 				id = "123"

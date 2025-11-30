@@ -189,7 +189,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	defer os.Remove(tmpFile)
 
-	if err := gh.EditIssue(issueNumber, fm.Title, tmpFile); err != nil {
+	if err := gh.EditIssue(issueNumber, fm.Title(), tmpFile); err != nil {
 		return model.NewEnvError("", err)
 	}
 
@@ -377,7 +377,7 @@ func runLink(cmd *cobra.Command, args []string) error {
 	}
 
 	parentInt, _ := strconv.Atoi(parent)
-	if fm.Parent != nil && *fm.Parent == parentInt {
+	if fm.HasParent(parentInt) {
 		fmt.Printf("%s already linked to parent #%s; no changes made\n", filePath, parent)
 		return nil
 	}
@@ -386,14 +386,14 @@ func runLink(cmd *cobra.Command, args []string) error {
 		return model.NewEnvError("", err)
 	}
 
-	fm.Parent = &parentInt
-	content, err := filefmt.EncodeMarkdown(*fm, body)
+	fm.SetParent(parentInt)
+	content, err := filefmt.EncodeFrontmatterDoc(fm, body)
 	if err != nil {
 		return model.NewIOError("sub-issue linked but failed to encode markdown", err)
 	}
 
 	if err := filefmt.AtomicWriteFile(filePath, content, 0o644); err != nil {
-		return model.NewIOError("sub-issue linked on GitHub but failed to update local file", err)
+		return model.NewIOError("sub-issue linked on GitHub but failed to update local file; manually add the same parent to the frontmatter to restore consistency", err)
 	}
 
 	fmt.Printf("Linked #%s under #%s and updated %s\n", child, parent, filePath)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,26 @@ func prepareLinkFixture(t *testing.T, parent *int) string {
 	path := filepath.Join("issues", "5.md")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("failed to write fixture: %v", err)
+	}
+
+	return path
+}
+
+func writeCustomMarkdown(t *testing.T, content string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	if err := os.MkdirAll("issues", 0o755); err != nil {
+		t.Fatalf("failed to create issues dir: %v", err)
+	}
+
+	path := filepath.Join("issues", "5.md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write custom markdown: %v", err)
 	}
 
 	return path
@@ -75,6 +96,49 @@ func TestRunLinkAddsParentAndUpdatesFile(t *testing.T) {
 	}
 
 	expected := "---\ntitle: Child title\nparent: 7\n---\nchild body"
+	if string(updated) != expected {
+		t.Fatalf("frontmatter order or content mismatch\nexpected:\n%s\nactual:\n%s", expected, string(updated))
+	}
+}
+
+func TestRunLinkPreservesFrontmatterOrderAndUnknownKeys(t *testing.T) {
+	resetDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to capture cwd: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(resetDir) })
+
+	initial := "---\ntitle: Child title\nlabels:\n  - foo\ncustom: bar\n---\nbody"
+	path := writeCustomMarkdown(t, initial)
+
+	called := false
+	addSubIssueFn = func(child, parent string) error {
+		called = true
+		if child != "5" || parent != "7" {
+			t.Fatalf("unexpected parameters child=%s parent=%s", child, parent)
+		}
+		return nil
+	}
+	t.Cleanup(func() { addSubIssueFn = gh.AddSubIssue })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("parent", "", "")
+	cmd.Flags().Set("parent", "7")
+
+	if err := runLink(cmd, []string{"5"}); err != nil {
+		t.Fatalf("runLink returned error: %v", err)
+	}
+
+	if !called {
+		t.Fatalf("expected AddSubIssue to be called")
+	}
+
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+
+	expected := "---\ntitle: Child title\nlabels:\n  - foo\ncustom: bar\nparent: 7\n---\nbody"
 	if string(updated) != expected {
 		t.Fatalf("frontmatter order or content mismatch\nexpected:\n%s\nactual:\n%s", expected, string(updated))
 	}
@@ -139,5 +203,39 @@ func TestRunLinkRejectsSameNumbers(t *testing.T) {
 	}
 	if exitErr.Code != model.ExitUsage {
 		t.Fatalf("expected usage exit code, got %v", exitErr.Code)
+	}
+}
+
+func TestRunLinkLeavesFileUntouchedWhenRemoteLinkFails(t *testing.T) {
+	resetDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to capture cwd: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(resetDir) })
+
+	initial := "---\ntitle: Child title\nextra: keep-me\n---\nbody"
+	path := writeCustomMarkdown(t, initial)
+
+	addSubIssueFn = func(_, _ string) error {
+		return errors.New("remote failure")
+	}
+	t.Cleanup(func() { addSubIssueFn = gh.AddSubIssue })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("parent", "", "")
+	cmd.Flags().Set("parent", "7")
+
+	err = runLink(cmd, []string{"5"})
+	if err == nil {
+		t.Fatalf("expected error when AddSubIssue fails")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+
+	if string(data) != initial {
+		t.Fatalf("file should remain unchanged after remote failure\nexpected:\n%s\nactual:\n%s", initial, string(data))
 	}
 }
