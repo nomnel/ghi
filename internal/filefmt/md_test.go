@@ -7,8 +7,8 @@ import (
 )
 
 func TestEncodeMarkdownIncludesParent(t *testing.T) {
-	parent := 42
-	fm := model.Frontmatter{Title: "Child issue", Parent: &parent}
+	parent := "42"
+	fm := model.Frontmatter{Title: "Child issue", Parent: parent}
 	body := []byte("Parent-aware body")
 
 	got, err := EncodeMarkdown(fm, body)
@@ -16,7 +16,7 @@ func TestEncodeMarkdownIncludesParent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := "---\ntitle: Child issue\nparent: 42\n---\nParent-aware body"
+	expected := "---\ntitle: Child issue\nparent: \"42\"\n---\nParent-aware body"
 	if string(got) != expected {
 		t.Fatalf("frontmatter with parent mismatch\nexpected:\n%s\nactual:\n%s", expected, string(got))
 	}
