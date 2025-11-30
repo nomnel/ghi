@@ -39,3 +39,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 .*.tmp
+
+# Go build cache (local override for sandbox)
+.gocache/

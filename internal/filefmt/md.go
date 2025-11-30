@@ -14,32 +14,73 @@ import (
 const frontmatterDelimiter = "---"
 
 func EncodeMarkdown(fm model.Frontmatter, body []byte) ([]byte, error) {
+	return EncodeMarkdownNode(structToMappingNode(fm), body)
+}
+
+func EncodeMarkdownNode(fm *yaml.Node, body []byte) ([]byte, error) {
+	if fm == nil {
+		return nil, fmt.Errorf("frontmatter node is nil")
+	}
+
 	var buf bytes.Buffer
-	
+
 	buf.WriteString(frontmatterDelimiter + "\n")
-	
+
 	encoder := yaml.NewEncoder(&buf)
 	encoder.SetIndent(2)
 	if err := encoder.Encode(fm); err != nil {
 		return nil, fmt.Errorf("failed to encode frontmatter: %w", err)
 	}
 	encoder.Close()
-	
+
 	buf.WriteString(frontmatterDelimiter + "\n")
-	
+
 	buf.Write(body)
-	
+
 	return buf.Bytes(), nil
 }
 
 func DecodeMarkdown(raw []byte) (*model.Frontmatter, []byte, error) {
+	fmNode, body, err := DecodeMarkdownNode(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var fm model.Frontmatter
+	if err := fmNode.Decode(&fm); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse frontmatter YAML: %w", err)
+	}
+
+	return &fm, body, nil
+}
+
+func DecodeMarkdownNode(raw []byte) (*yaml.Node, []byte, error) {
+	frontmatterContent, body, err := splitFrontmatter(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(frontmatterContent), &root); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse frontmatter YAML: %w", err)
+	}
+
+	mapping := unwrapToMapping(&root)
+	if mapping == nil {
+		return nil, nil, fmt.Errorf("failed to parse frontmatter YAML: expected mapping node")
+	}
+
+	return mapping, body, nil
+}
+
+func splitFrontmatter(raw []byte) (string, []byte, error) {
 	content := string(raw)
 	lines := strings.Split(content, "\n")
-	
+
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != frontmatterDelimiter {
-		return nil, nil, fmt.Errorf("%w: file must start with '---'", model.ErrMalformedFrontmatter)
+		return "", nil, fmt.Errorf("%w: file must start with '---'", model.ErrMalformedFrontmatter)
 	}
-	
+
 	closingIdx := -1
 	for i := 1; i < len(lines); i++ {
 		if strings.TrimSpace(lines[i]) == frontmatterDelimiter {
@@ -47,64 +88,81 @@ func DecodeMarkdown(raw []byte) (*model.Frontmatter, []byte, error) {
 			break
 		}
 	}
-	
+
 	if closingIdx == -1 {
-		return nil, nil, fmt.Errorf("%w: missing closing '---'", model.ErrMalformedFrontmatter)
+		return "", nil, fmt.Errorf("%w: missing closing '---'", model.ErrMalformedFrontmatter)
 	}
-	
+
 	frontmatterContent := strings.Join(lines[1:closingIdx], "\n")
-	
-	var fm model.Frontmatter
-	if err := yaml.Unmarshal([]byte(frontmatterContent), &fm); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse frontmatter YAML: %w", err)
-	}
-	
+
 	bodyStartIdx := closingIdx + 1
 	var bodyLines []string
 	if bodyStartIdx < len(lines) {
 		bodyLines = lines[bodyStartIdx:]
 	}
 	body := []byte(strings.Join(bodyLines, "\n"))
-	
-	return &fm, body, nil
+
+	return frontmatterContent, body, nil
+}
+
+func unwrapToMapping(node *yaml.Node) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+
+	if node.Kind == yaml.DocumentNode && len(node.Content) == 1 {
+		node = node.Content[0]
+	}
+
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	return node
+}
+
+func structToMappingNode(fm model.Frontmatter) *yaml.Node {
+	var node yaml.Node
+	_ = node.Encode(fm)
+	return unwrapToMapping(&node)
 }
 
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
-	
+
 	tmp, err := os.CreateTemp(dir, fmt.Sprintf(".%s-*.tmp", filepath.Base(path)))
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
-	
+
 	defer func() {
 		if tmp != nil {
 			tmp.Close()
 			os.Remove(tmpName)
 		}
 	}()
-	
+
 	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("failed to write to temp file: %w", err)
 	}
-	
+
 	if err := tmp.Sync(); err != nil {
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
-	
+
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 	tmp = nil
-	
+
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return fmt.Errorf("failed to set file permissions: %w", err)
 	}
-	
+
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
-	
+
 	return nil
 }

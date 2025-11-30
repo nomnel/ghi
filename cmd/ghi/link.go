@@ -10,10 +10,12 @@ import (
 	"github.com/nomnel/ghi/internal/gh"
 	"github.com/nomnel/ghi/internal/model"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
-	linkParent string
+	linkParent  string
+	addSubIssue = gh.AddSubIssue
 )
 
 var linkCmd = &cobra.Command{
@@ -57,17 +59,17 @@ func runLink(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if alreadyLinked {
-		fmt.Printf("%s already linked to parent #%s. No changes made.\n", issuePath, parentNumber)
-		return nil
-	}
-
-	if err := gh.AddSubIssue(childNumber, parentNumber); err != nil {
+	if err := addSubIssue(childNumber, parentNumber); err != nil {
 		return model.NewEnvError("", err)
 	}
 
 	if err := updateParentFrontmatter(issuePath, parentNumber, stat.Mode().Perm()); err != nil {
 		return err
+	}
+
+	if alreadyLinked {
+		fmt.Printf("Ensured remote parent link for #%s -> #%s (frontmatter already set).\n", childNumber, parentNumber)
+		return nil
 	}
 
 	fmt.Printf("Linked issue #%s as child of #%s and updated %s\n", childNumber, parentNumber, issuePath)
@@ -80,13 +82,15 @@ func ensureParentFrontmatter(issuePath, parentNumber string) (bool, error) {
 		return false, model.NewIOError("failed to read local issue file", err)
 	}
 
-	fm, _, err := filefmt.DecodeMarkdown(raw)
+	fmNode, _, err := filefmt.DecodeMarkdownNode(raw)
 	if err != nil {
 		return false, model.NewIOError("failed to parse markdown", err)
 	}
 
-	if fm.Parent == parentNumber {
-		return true, nil
+	for i := 0; i+1 < len(fmNode.Content); i += 2 {
+		if fmNode.Content[i].Value == "parent" && fmNode.Content[i+1].Value == parentNumber {
+			return true, nil
+		}
 	}
 
 	return false, nil
@@ -98,14 +102,14 @@ func updateParentFrontmatter(issuePath, parentNumber string, perm os.FileMode) e
 		return model.NewIOError("failed to read local issue file", err)
 	}
 
-	fm, body, err := filefmt.DecodeMarkdown(raw)
+	fmNode, body, err := filefmt.DecodeMarkdownNode(raw)
 	if err != nil {
 		return model.NewIOError("failed to parse markdown", err)
 	}
 
-	fm.Parent = parentNumber
+	upsertParentNode(fmNode, parentNumber)
 
-	content, err := filefmt.EncodeMarkdown(*fm, body)
+	content, err := filefmt.EncodeMarkdownNode(fmNode, body)
 	if err != nil {
 		return model.NewIOError("failed to encode markdown", err)
 	}
@@ -115,4 +119,21 @@ func updateParentFrontmatter(issuePath, parentNumber string, perm os.FileMode) e
 	}
 
 	return nil
+}
+
+func upsertParentNode(fmNode *yaml.Node, parentNumber string) {
+	if fmNode == nil || fmNode.Kind != yaml.MappingNode {
+		return
+	}
+
+	for i := 0; i+1 < len(fmNode.Content); i += 2 {
+		if fmNode.Content[i].Value == "parent" {
+			fmNode.Content = append(fmNode.Content[:i], fmNode.Content[i+2:]...)
+			break
+		}
+	}
+
+	key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "parent"}
+	value := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: parentNumber}
+	fmNode.Content = append(fmNode.Content, key, value)
 }
