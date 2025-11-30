@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/nomnel/ghi/internal/filefmt"
@@ -13,6 +14,8 @@ import (
 )
 
 const issuesDir = "issues"
+
+var addSubIssueFn = gh.AddSubIssue
 
 var rootCmd = &cobra.Command{
 	Use:   "ghi",
@@ -62,6 +65,13 @@ var reopenCmd = &cobra.Command{
 	RunE:  runReopen,
 }
 
+var linkCmd = &cobra.Command{
+	Use:   "link <child> --parent <parent>",
+	Short: "Link a child issue under a parent issue",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runLink,
+}
+
 var listCmd = &cobra.Command{
 	Use:                "list [-- GH_ISSUE_LIST_OPTIONS...]",
 	Short:              "List open GitHub Issues with custom formatting",
@@ -84,6 +94,9 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(closeCmd)
 	rootCmd.AddCommand(reopenCmd)
+	linkCmd.Flags().String("parent", "", "Parent issue number")
+	linkCmd.MarkFlagRequired("parent")
+	rootCmd.AddCommand(linkCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(pruneCmd)
 }
@@ -176,7 +189,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	defer os.Remove(tmpFile)
 
-	if err := gh.EditIssue(issueNumber, fm.Title, tmpFile); err != nil {
+	if err := gh.EditIssue(issueNumber, fm.Title(), tmpFile); err != nil {
 		return model.NewEnvError("", err)
 	}
 
@@ -331,6 +344,59 @@ func runReopen(cmd *cobra.Command, args []string) error {
 		return model.NewEnvError("", err)
 	}
 
+	return nil
+}
+
+func runLink(cmd *cobra.Command, args []string) error {
+	child := args[0]
+	parent, _ := cmd.Flags().GetString("parent")
+
+	if parent == "" || !model.IsNumeric(child) || !model.IsNumeric(parent) {
+		return model.NewUsageError("Usage: ghi link <child> --parent <parent>")
+	}
+
+	if child == parent {
+		return model.NewUsageError("Usage: child and parent issue numbers must differ")
+	}
+
+	filePath := filepath.Join(issuesDir, fmt.Sprintf("%s.md", child))
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return model.NewIOError(fmt.Sprintf("%s not found. Run 'ghi pull %s' first", filePath, child), err)
+		}
+		return model.NewIOError("failed to read issue file", err)
+	}
+
+	fm, body, err := filefmt.DecodeMarkdown(raw)
+	if err != nil {
+		if strings.Contains(err.Error(), "malformed frontmatter") {
+			return model.NewIOError(fmt.Sprintf("Invalid frontmatter in %s", filePath), err)
+		}
+		return model.NewIOError("failed to parse markdown", err)
+	}
+
+	parentInt, _ := strconv.Atoi(parent)
+	if fm.HasParent(parentInt) {
+		fmt.Printf("%s already linked to parent #%s; no changes made\n", filePath, parent)
+		return nil
+	}
+
+	if err := addSubIssueFn(child, parent); err != nil {
+		return model.NewEnvError("", err)
+	}
+
+	fm.SetParent(parentInt)
+	content, err := filefmt.EncodeFrontmatterDoc(fm, body)
+	if err != nil {
+		return model.NewIOError("sub-issue linked but failed to encode markdown", err)
+	}
+
+	if err := filefmt.AtomicWriteFile(filePath, content, 0o644); err != nil {
+		return model.NewIOError("sub-issue linked on GitHub but failed to update local file; manually add the same parent to the frontmatter to restore consistency", err)
+	}
+
+	fmt.Printf("Linked #%s under #%s and updated %s\n", child, parent, filePath)
 	return nil
 }
 

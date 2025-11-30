@@ -15,8 +15,14 @@ import (
 
 const commandTimeout = 30 * time.Second
 
+var (
+	commandContext     = exec.CommandContext
+	commandLookPath    = exec.LookPath
+	repositoryInfoFunc = realGetRepositoryInfo
+)
+
 func checkGHAvailable() error {
-	_, err := exec.LookPath("gh")
+	_, err := commandLookPath("gh")
 	if err != nil {
 		return fmt.Errorf("gh CLI not found. Install GitHub CLI and run 'gh auth login'")
 	}
@@ -54,7 +60,7 @@ func ViewIssue(issueNumber string) (*model.IssueData, error) {
   }
 }`
 
-	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
+	cmd := commandContext(ctx, "gh", "api", "graphql",
 		"-H", "GraphQL-Features: sub_issues",
 		"-f", "query="+query,
 		"-f", "owner="+owner,
@@ -142,7 +148,7 @@ func EditIssue(issueNumber string, title string, bodyFile string) error {
 
 	args = append(args, "--body-file", bodyFile)
 
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd := commandContext(ctx, "gh", args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -190,7 +196,7 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 	args = append(args, extraArgs...)
 	args = append(args, "--", localPath, remotePath)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := commandContext(ctx, "git", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -205,7 +211,107 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 	return 0, nil
 }
 
+func GetIssueID(issueNumber string) (string, error) {
+	if err := checkGHAvailable(); err != nil {
+		return "", err
+	}
+
+	owner, repo, err := GetRepositoryInfo()
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	apiPath := fmt.Sprintf("repos/%s/%s/issues/%s", owner, repo, issueNumber)
+	cmd := commandContext(ctx, "gh", "api",
+		"-H", "Accept: application/vnd.github+json",
+		"-H", "X-GitHub-Api-Version: 2022-11-28",
+		apiPath,
+		"--jq", ".id",
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if strings.Contains(stderrStr, "404") {
+			return "", fmt.Errorf("gh error: issue #%s not found", issueNumber)
+		}
+		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "401") {
+			return "", fmt.Errorf("gh error: authentication required")
+		}
+		return "", fmt.Errorf("gh error: %s", stderrStr)
+	}
+
+	id := strings.TrimSpace(stdout.String())
+	if id == "" {
+		return "", fmt.Errorf("gh error: issue id missing for #%s", issueNumber)
+	}
+
+	return id, nil
+}
+
+func AddSubIssue(childNumber, parentNumber string) error {
+	if err := checkGHAvailable(); err != nil {
+		return err
+	}
+
+	if childNumber == parentNumber {
+		return fmt.Errorf("child and parent issue cannot be the same")
+	}
+
+	childID, err := GetIssueID(childNumber)
+	if err != nil {
+		return err
+	}
+
+	owner, repo, err := GetRepositoryInfo()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	apiPath := fmt.Sprintf("repos/%s/%s/issues/%s/sub_issues", owner, repo, parentNumber)
+	cmd := commandContext(ctx, "gh", "api", "--method", "POST",
+		"-H", "Accept: application/vnd.github+json",
+		"-H", "X-GitHub-Api-Version: 2022-11-28",
+		apiPath,
+		"-F", "sub_issue_id="+childID,
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		switch {
+		case strings.Contains(stderrStr, "401") || strings.Contains(strings.ToLower(stderrStr), "authentication"):
+			return fmt.Errorf("gh error: authentication required (HTTP 401)")
+		case strings.Contains(stderrStr, "403"):
+			return fmt.Errorf("gh error: forbidden: ensure sub-issues are enabled and you have permissions (HTTP 403)")
+		case strings.Contains(stderrStr, "404"):
+			return fmt.Errorf("gh error: parent issue not found or sub-issues disabled (HTTP 404)")
+		case strings.Contains(stderrStr, "422"):
+			return fmt.Errorf("gh error: sub-issue request rejected (HTTP 422): %s", stderrStr)
+		default:
+			return fmt.Errorf("gh error: %s", stderrStr)
+		}
+	}
+
+	return nil
+}
+
 func GetRepositoryInfo() (owner string, repo string, err error) {
+	return repositoryInfoFunc()
+}
+
+func realGetRepositoryInfo() (owner string, repo string, err error) {
 	if err := checkGHAvailable(); err != nil {
 		return "", "", err
 	}
@@ -213,7 +319,7 @@ func GetRepositoryInfo() (owner string, repo string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	cmd := commandContext(ctx, "gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -257,7 +363,7 @@ func CreateIssue(title string) (int, error) {
 	defer cancel()
 
 	apiPath := fmt.Sprintf("repos/%s/%s/issues", owner, repo)
-	cmd := exec.CommandContext(ctx, "gh", "api", "--method", "POST",
+	cmd := commandContext(ctx, "gh", "api", "--method", "POST",
 		"-H", "Accept: application/vnd.github+json",
 		apiPath,
 		"-f", "title="+title)
@@ -294,7 +400,7 @@ func CloseIssue(issueNumber string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gh", "issue", "close", issueNumber)
+	cmd := commandContext(ctx, "gh", "issue", "close", issueNumber)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -335,7 +441,7 @@ func ReopenIssue(issueNumber string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gh", "issue", "reopen", issueNumber)
+	cmd := commandContext(ctx, "gh", "issue", "reopen", issueNumber)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -379,7 +485,7 @@ func ListIssues(extraArgs []string) ([]model.IssueListItem, error) {
 	args := []string{"issue", "list", "--json", "number,title,url"}
 	args = append(args, extraArgs...)
 
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd := commandContext(ctx, "gh", args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
