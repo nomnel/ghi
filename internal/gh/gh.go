@@ -211,6 +211,16 @@ func RunGitDiff(localPath, remotePath string, extraArgs []string) (int, error) {
 	return 0, nil
 }
 
+type linkMutationType string
+type graphQLError struct {
+	Message string `json:"message"`
+}
+
+const (
+	linkMutationSubIssue  linkMutationType = "sub_issue"
+	linkMutationBlockedBy linkMutationType = "blocked_by"
+)
+
 func GetIssueID(issueNumber string) (string, error) {
 	if err := checkGHAvailable(); err != nil {
 		return "", err
@@ -224,12 +234,19 @@ func GetIssueID(issueNumber string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	apiPath := fmt.Sprintf("repos/%s/%s/issues/%s", owner, repo, issueNumber)
-	cmd := commandContext(ctx, "gh", "api",
-		"-H", "Accept: application/vnd.github+json",
-		"-H", "X-GitHub-Api-Version: 2022-11-28",
-		apiPath,
-		"--jq", ".id",
+	query := `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      id
+    }
+  }
+}`
+
+	cmd := commandContext(ctx, "gh", "api", "graphql",
+		"-f", "query="+query,
+		"-f", "owner="+owner,
+		"-f", "name="+repo,
+		"-F", "number="+issueNumber,
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -238,7 +255,7 @@ func GetIssueID(issueNumber string) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
-		if strings.Contains(stderrStr, "404") {
+		if strings.Contains(stderrStr, "404") || strings.Contains(strings.ToLower(stderrStr), "not found") {
 			return "", fmt.Errorf("gh error: issue #%s not found", issueNumber)
 		}
 		if strings.Contains(stderrStr, "authentication") || strings.Contains(stderrStr, "401") {
@@ -247,12 +264,34 @@ func GetIssueID(issueNumber string) (string, error) {
 		return "", fmt.Errorf("gh error: %s", stderrStr)
 	}
 
-	id := strings.TrimSpace(stdout.String())
-	if id == "" {
+	var response struct {
+		Data struct {
+			Repository struct {
+				Issue *struct {
+					ID string `json:"id"`
+				} `json:"issue"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []graphQLError `json:"errors"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return "", fmt.Errorf("failed to parse gh output: %w", err)
+	}
+
+	if len(response.Errors) > 0 && response.Data.Repository.Issue == nil {
+		errorText := collectGraphQLErrorMessages(response.Errors)
+		if strings.Contains(errorText, "Could not resolve to an Issue") {
+			return "", fmt.Errorf("gh error: issue #%s not found", issueNumber)
+		}
+		return "", fmt.Errorf("gh error: %s", errorText)
+	}
+
+	if response.Data.Repository.Issue == nil || strings.TrimSpace(response.Data.Repository.Issue.ID) == "" {
 		return "", fmt.Errorf("gh error: issue id missing for #%s", issueNumber)
 	}
 
-	return id, nil
+	return response.Data.Repository.Issue.ID, nil
 }
 
 func AddSubIssue(childNumber, parentNumber string) error {
@@ -269,42 +308,133 @@ func AddSubIssue(childNumber, parentNumber string) error {
 		return err
 	}
 
-	owner, repo, err := GetRepositoryInfo()
+	parentID, err := GetIssueID(parentNumber)
 	if err != nil {
 		return err
+	}
+
+	mutation := `mutation($issueId: ID!, $subIssueId: ID!) {
+  addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId, replaceParent: true}) {
+    clientMutationId
+  }
+}`
+
+	return runIssueLinkMutation(
+		linkMutationSubIssue,
+		mutation,
+		"issueId", parentID,
+		"subIssueId", childID,
+	)
+}
+
+func AddBlockedBy(issueNumber, blockingIssueNumber string) error {
+	if err := checkGHAvailable(); err != nil {
+		return err
+	}
+
+	if issueNumber == blockingIssueNumber {
+		return fmt.Errorf("issue and blocking issue cannot be the same")
+	}
+
+	issueID, err := GetIssueID(issueNumber)
+	if err != nil {
+		return err
+	}
+
+	blockingIssueID, err := GetIssueID(blockingIssueNumber)
+	if err != nil {
+		return err
+	}
+
+	mutation := `mutation($issueId: ID!, $blockingIssueId: ID!) {
+  addBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) {
+    clientMutationId
+  }
+}`
+
+	return runIssueLinkMutation(
+		linkMutationBlockedBy,
+		mutation,
+		"issueId", issueID,
+		"blockingIssueId", blockingIssueID,
+	)
+}
+
+func runIssueLinkMutation(mutationType linkMutationType, mutation string, variablePairs ...string) error {
+	if len(variablePairs)%2 != 0 {
+		return fmt.Errorf("internal error: variable pairs must be key/value")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	apiPath := fmt.Sprintf("repos/%s/%s/issues/%s/sub_issues", owner, repo, parentNumber)
-	cmd := commandContext(ctx, "gh", "api", "--method", "POST",
-		"-H", "Accept: application/vnd.github+json",
-		"-H", "X-GitHub-Api-Version: 2022-11-28",
-		apiPath,
-		"-F", "sub_issue_id="+childID,
-	)
+	args := []string{"api", "graphql", "-H", "GraphQL-Features: sub_issues", "-f", "query=" + mutation}
+	for i := 0; i < len(variablePairs); i += 2 {
+		key := variablePairs[i]
+		value := variablePairs[i+1]
+		args = append(args, "-f", key+"="+value)
+	}
 
-	var stderr bytes.Buffer
+	cmd := commandContext(ctx, "gh", args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		stderrStr := strings.TrimSpace(stderr.String())
-		switch {
-		case strings.Contains(stderrStr, "401") || strings.Contains(strings.ToLower(stderrStr), "authentication"):
-			return fmt.Errorf("gh error: authentication required (HTTP 401)")
-		case strings.Contains(stderrStr, "403"):
-			return fmt.Errorf("gh error: forbidden: ensure sub-issues are enabled and you have permissions (HTTP 403)")
-		case strings.Contains(stderrStr, "404"):
-			return fmt.Errorf("gh error: parent issue not found or sub-issues disabled (HTTP 404)")
-		case strings.Contains(stderrStr, "422"):
-			return fmt.Errorf("gh error: sub-issue request rejected (HTTP 422): %s", stderrStr)
-		default:
-			return fmt.Errorf("gh error: %s", stderrStr)
-		}
+		return mapIssueLinkError(mutationType, strings.TrimSpace(stderr.String()))
+	}
+
+	var response struct {
+		Errors []graphQLError `json:"errors"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return fmt.Errorf("failed to parse gh output: %w", err)
+	}
+
+	if len(response.Errors) > 0 {
+		return mapIssueLinkError(mutationType, collectGraphQLErrorMessages(response.Errors))
 	}
 
 	return nil
+}
+
+func collectGraphQLErrorMessages(errors []graphQLError) string {
+	messages := make([]string, 0, len(errors))
+	for _, entry := range errors {
+		if strings.TrimSpace(entry.Message) != "" {
+			messages = append(messages, strings.TrimSpace(entry.Message))
+		}
+	}
+
+	return strings.Join(messages, "; ")
+}
+
+func mapIssueLinkError(mutationType linkMutationType, raw string) error {
+	lower := strings.ToLower(raw)
+
+	switch {
+	case strings.Contains(raw, "401") || strings.Contains(lower, "authentication") || strings.Contains(lower, "unauthorized"):
+		return fmt.Errorf("gh error: authentication required (HTTP 401)")
+	case strings.Contains(raw, "403") || strings.Contains(lower, "forbidden") || strings.Contains(lower, "resource not accessible"):
+		if mutationType == linkMutationSubIssue {
+			return fmt.Errorf("gh error: forbidden: ensure sub-issues are enabled and you have permissions (HTTP 403)")
+		}
+		return fmt.Errorf("gh error: forbidden: ensure issue dependencies are enabled and you have permissions (HTTP 403)")
+	case strings.Contains(raw, "404") || strings.Contains(lower, "not found") || strings.Contains(lower, "could not resolve"):
+		if mutationType == linkMutationSubIssue {
+			return fmt.Errorf("gh error: parent issue not found or sub-issues disabled (HTTP 404)")
+		}
+		return fmt.Errorf("gh error: dependency issue not found (HTTP 404)")
+	case strings.Contains(raw, "422") || strings.Contains(lower, "unprocessable"):
+		if mutationType == linkMutationSubIssue {
+			return fmt.Errorf("gh error: sub-issue request rejected (HTTP 422): %s", raw)
+		}
+		return fmt.Errorf("gh error: dependency request rejected (HTTP 422): %s", raw)
+	default:
+		return fmt.Errorf("gh error: %s", raw)
+	}
 }
 
 func GetRepositoryInfo() (owner string, repo string, err error) {

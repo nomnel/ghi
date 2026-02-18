@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +18,7 @@ import (
 const issuesDir = "issues"
 
 var addSubIssueFn = gh.AddSubIssue
+var addBlockedByFn = gh.AddBlockedBy
 
 var rootCmd = &cobra.Command{
 	Use:   "ghi",
@@ -66,8 +69,8 @@ var reopenCmd = &cobra.Command{
 }
 
 var linkCmd = &cobra.Command{
-	Use:   "link <child> --parent <parent>",
-	Short: "Link a child issue under a parent issue",
+	Use:   "link <issue> [--parent <parent>] [--blocked-by <issue> ...]",
+	Short: "Link parent and dependency relationships for an issue",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runLink,
 }
@@ -94,8 +97,10 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(closeCmd)
 	rootCmd.AddCommand(reopenCmd)
-	linkCmd.Flags().String("parent", "", "Parent issue number")
-	linkCmd.MarkFlagRequired("parent")
+	linkCmd.Flags().String("parent", "", "Parent issue number or GitHub issue URL")
+	linkCmd.Flags().StringArray("blocked-by", nil, "Issue number or GitHub issue URL that blocks this issue (repeatable)")
+	linkCmd.Flags().StringArray("depends-on", nil, "Unsupported option; use --blocked-by")
+	_ = linkCmd.Flags().MarkHidden("depends-on")
 	rootCmd.AddCommand(linkCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(pruneCmd)
@@ -348,22 +353,57 @@ func runReopen(cmd *cobra.Command, args []string) error {
 }
 
 func runLink(cmd *cobra.Command, args []string) error {
-	child := args[0]
-	parent, _ := cmd.Flags().GetString("parent")
+	const usage = "Usage: ghi link <issue> [--parent <parent>] [--blocked-by <issue> ...]"
 
-	if parent == "" || !model.IsNumeric(child) || !model.IsNumeric(parent) {
-		return model.NewUsageError("Usage: ghi link <child> --parent <parent>")
+	dependsOn, _ := cmd.Flags().GetStringArray("depends-on")
+	if len(dependsOn) > 0 {
+		return model.NewUsageError(usage + "\n--depends-on is not supported. Use --blocked-by instead.")
 	}
 
-	if child == parent {
+	issue, err := normalizeIssueReference(args[0])
+	if err != nil {
+		return model.NewUsageError(usage)
+	}
+
+	parentRaw, _ := cmd.Flags().GetString("parent")
+	var parent *int
+	if strings.TrimSpace(parentRaw) != "" {
+		parentIssue, err := normalizeIssueReference(parentRaw)
+		if err != nil {
+			return model.NewUsageError(usage)
+		}
+		parent = &parentIssue
+	}
+
+	blockedByRaw, _ := cmd.Flags().GetStringArray("blocked-by")
+	blockedBy, err := normalizeIssueReferences(blockedByRaw)
+	if err != nil {
+		return model.NewUsageError(usage)
+	}
+
+	if parent == nil && len(blockedBy) == 0 {
+		return model.NewUsageError(usage)
+	}
+
+	if parent != nil && issue == *parent {
 		return model.NewUsageError("Usage: child and parent issue numbers must differ")
 	}
 
-	filePath := filepath.Join(issuesDir, fmt.Sprintf("%s.md", child))
+	for _, blocker := range blockedBy {
+		if blocker == issue {
+			return model.NewUsageError("Usage: --blocked-by cannot include the target issue")
+		}
+		if parent != nil && blocker == *parent {
+			return model.NewUsageError("Usage: --blocked-by cannot include --parent")
+		}
+	}
+
+	issueNumber := strconv.Itoa(issue)
+	filePath := filepath.Join(issuesDir, fmt.Sprintf("%s.md", issueNumber))
 	raw, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return model.NewIOError(fmt.Sprintf("%s not found. Run 'ghi pull %s' first", filePath, child), err)
+			return model.NewIOError(fmt.Sprintf("%s not found. Run 'ghi pull %s' first", filePath, issueNumber), err)
 		}
 		return model.NewIOError("failed to read issue file", err)
 	}
@@ -376,28 +416,149 @@ func runLink(cmd *cobra.Command, args []string) error {
 		return model.NewIOError("failed to parse markdown", err)
 	}
 
-	parentInt, _ := strconv.Atoi(parent)
-	if fm.HasParent(parentInt) {
-		fmt.Printf("%s already linked to parent #%s; no changes made\n", filePath, parent)
-		return nil
+	existingBlockedBy, err := fm.BlockedBy()
+	if err != nil {
+		return model.NewIOError(fmt.Sprintf("Invalid frontmatter in %s", filePath), err)
 	}
 
-	if err := addSubIssueFn(child, parent); err != nil {
-		return model.NewEnvError("", err)
+	parentStatus := "not-requested"
+	if parent != nil {
+		if fm.HasParent(*parent) {
+			parentStatus = "unchanged"
+		} else {
+			parentStatus = "pending"
+		}
 	}
 
-	fm.SetParent(parentInt)
+	existingBlockers := make(map[int]struct{}, len(existingBlockedBy))
+	for _, value := range existingBlockedBy {
+		existingBlockers[value] = struct{}{}
+	}
+
+	blockedByToCreate := make([]int, 0, len(blockedBy))
+	for _, value := range blockedBy {
+		if _, exists := existingBlockers[value]; !exists {
+			blockedByToCreate = append(blockedByToCreate, value)
+		}
+	}
+
+	blockedByAdded := 0
+	anyRemoteSuccess := false
+	remoteErrors := make([]error, 0, 1+len(blockedByToCreate))
+
+	if parentStatus == "pending" {
+		if err := addSubIssueFn(issueNumber, strconv.Itoa(*parent)); err != nil {
+			parentStatus = "failed"
+			remoteErrors = append(remoteErrors, fmt.Errorf("failed to add parent link: %w", err))
+		} else {
+			parentStatus = "added"
+			anyRemoteSuccess = true
+		}
+	}
+
+	for _, blocker := range blockedByToCreate {
+		if err := addBlockedByFn(issueNumber, strconv.Itoa(blocker)); err != nil {
+			remoteErrors = append(remoteErrors, fmt.Errorf("failed to add blocked-by link #%d: %w", blocker, err))
+			continue
+		}
+		blockedByAdded++
+		anyRemoteSuccess = true
+	}
+
+	if len(remoteErrors) > 0 {
+		fmt.Println(linkSummaryLine(parentStatus, blockedByAdded, len(blockedBy), anyRemoteSuccess))
+		return model.NewEnvError("", errors.Join(remoteErrors...))
+	}
+
+	if parentStatus == "added" {
+		fm.SetParent(*parent)
+	}
+
+	if len(blockedBy) > 0 {
+		merged := append(append([]int{}, existingBlockedBy...), blockedBy...)
+		fm.SetBlockedBy(merged)
+	}
+
 	content, err := filefmt.EncodeFrontmatterDoc(fm, body)
 	if err != nil {
-		return model.NewIOError("sub-issue linked but failed to encode markdown", err)
+		return model.NewIOError("issue links updated on GitHub but failed to encode markdown", err)
 	}
 
 	if err := filefmt.AtomicWriteFile(filePath, content, 0o644); err != nil {
-		return model.NewIOError("sub-issue linked on GitHub but failed to update local file; manually add the same parent to the frontmatter to restore consistency", err)
+		return model.NewIOError("issue links updated on GitHub but failed to update local file; manually align frontmatter to restore consistency", err)
 	}
 
-	fmt.Printf("Linked #%s under #%s and updated %s\n", child, parent, filePath)
+	fmt.Println(linkSummaryLine(parentStatus, blockedByAdded, len(blockedBy), false))
 	return nil
+}
+
+func normalizeIssueReferences(rawReferences []string) ([]int, error) {
+	values := make([]int, 0, len(rawReferences))
+	for _, raw := range rawReferences {
+		value, err := normalizeIssueReference(raw)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+
+	return model.NormalizeIssueNumbers(values), nil
+}
+
+func normalizeIssueReference(raw string) (int, error) {
+	ref := strings.TrimSpace(raw)
+	if ref == "" {
+		return 0, fmt.Errorf("empty issue reference")
+	}
+
+	if model.IsNumeric(ref) {
+		n, err := strconv.Atoi(ref)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid issue number")
+		}
+		return n, nil
+	}
+
+	parsed, err := url.Parse(ref)
+	if err != nil {
+		return 0, fmt.Errorf("invalid issue URL: %w", err)
+	}
+
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return 0, fmt.Errorf("unsupported URL scheme")
+	}
+
+	host := strings.ToLower(parsed.Host)
+	if host != "github.com" && host != "www.github.com" {
+		return 0, fmt.Errorf("unsupported issue URL host")
+	}
+
+	pathParts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(pathParts) != 4 || pathParts[2] != "issues" || !model.IsNumeric(pathParts[3]) {
+		return 0, fmt.Errorf("unsupported issue URL path")
+	}
+
+	n, err := strconv.Atoi(pathParts[3])
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid issue URL number")
+	}
+
+	return n, nil
+}
+
+func linkSummaryLine(parentStatus string, blockedByAdded, blockedByRequested int, partialSuccess bool) string {
+	partial := "no"
+	if partialSuccess {
+		partial = "yes"
+	}
+
+	return fmt.Sprintf(
+		"link summary: parent=%s blocked_by_added=%d/%d partial_success=%s",
+		parentStatus,
+		blockedByAdded,
+		blockedByRequested,
+		partial,
+	)
 }
 
 func runList(cmd *cobra.Command, args []string) error {

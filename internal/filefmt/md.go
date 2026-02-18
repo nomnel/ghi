@@ -61,6 +61,37 @@ func (fm *FrontmatterDoc) HasParent(parent int) bool {
 	return *current == parent
 }
 
+// BlockedBy returns blocked_by values after normalization.
+func (fm *FrontmatterDoc) BlockedBy() ([]int, error) {
+	for i := 0; i+1 < len(fm.mapping.Content); i += 2 {
+		if fm.mapping.Content[i].Value != "blocked_by" {
+			continue
+		}
+
+		valueNode := fm.mapping.Content[i+1]
+		if valueNode.Kind != yaml.SequenceNode {
+			return nil, fmt.Errorf("invalid blocked_by value: must be a sequence")
+		}
+
+		values := make([]int, 0, len(valueNode.Content))
+		for _, item := range valueNode.Content {
+			if item.Kind != yaml.ScalarNode {
+				return nil, fmt.Errorf("invalid blocked_by entry: must be an integer")
+			}
+
+			value, err := strconv.Atoi(strings.TrimSpace(item.Value))
+			if err != nil || value <= 0 {
+				return nil, fmt.Errorf("invalid blocked_by entry: %q", item.Value)
+			}
+			values = append(values, value)
+		}
+
+		return model.NormalizeIssueNumbers(values), nil
+	}
+
+	return nil, nil
+}
+
 // SetParent removes any existing parent entry and appends a new one at the end
 // while leaving other keys and their order intact.
 func (fm *FrontmatterDoc) SetParent(parent int) {
@@ -77,6 +108,36 @@ func (fm *FrontmatterDoc) SetParent(parent int) {
 	key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "parent"}
 	val := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(parent)}
 	fm.mapping.Content = append(fm.mapping.Content, key, val)
+}
+
+// SetBlockedBy removes any existing blocked_by entry and appends a normalized
+// one at the end while leaving other keys and their order intact.
+func (fm *FrontmatterDoc) SetBlockedBy(blockedBy []int) {
+	normalized := model.NormalizeIssueNumbers(blockedBy)
+
+	cleaned := make([]*yaml.Node, 0, len(fm.mapping.Content))
+	for i := 0; i+1 < len(fm.mapping.Content); i += 2 {
+		if fm.mapping.Content[i].Value == "blocked_by" {
+			continue
+		}
+		cleaned = append(cleaned, fm.mapping.Content[i], fm.mapping.Content[i+1])
+	}
+	fm.mapping.Content = cleaned
+
+	if len(normalized) == 0 {
+		return
+	}
+
+	key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "blocked_by"}
+	seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+	for _, issueNumber := range normalized {
+		seq.Content = append(seq.Content, &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Tag:   "!!int",
+			Value: strconv.Itoa(issueNumber),
+		})
+	}
+	fm.mapping.Content = append(fm.mapping.Content, key, seq)
 }
 
 func EncodeMarkdown(fm model.Frontmatter, body []byte) ([]byte, error) {
