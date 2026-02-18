@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 )
 
 type Frontmatter struct {
-	Title  string `yaml:"title,omitempty"`
-	Parent *int   `yaml:"parent,omitempty"`
+	Title     string `yaml:"title,omitempty"`
+	Parent    *int   `yaml:"parent,omitempty"`
+	BlockedBy []int  `yaml:"blocked_by,omitempty"`
 }
 
 type ErrorType int
@@ -49,6 +51,35 @@ var numericRegex = regexp.MustCompile(`^[0-9]+$`)
 
 func IsNumeric(s string) bool {
 	return numericRegex.MatchString(s)
+}
+
+func NormalizeIssueNumbers(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+
+	normalized := make([]int, 0, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		normalized = append(normalized, value)
+	}
+
+	if len(normalized) == 0 {
+		return nil
+	}
+
+	sort.Ints(normalized)
+
+	out := normalized[:1]
+	for _, value := range normalized[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+
+	return out
 }
 
 type IssueData struct {
