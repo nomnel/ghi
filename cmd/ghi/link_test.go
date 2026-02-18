@@ -428,18 +428,22 @@ func TestRunLinkLeavesFileUntouchedWhenRemoteFailsAfterPartialSuccess(t *testing
 	}
 }
 
-func TestRunLinkLeavesFileUntouchedWhenParentLinkFails(t *testing.T) {
+func TestRunLinkLeavesFileUntouchedWhenParentLinkFailsButBlockedBySucceeds(t *testing.T) {
 	setupLinkWorkspace(t)
 
 	initial := "---\ntitle: Child title\nextra: keep\n---\nbody"
 	path := writeIssueRaw(t, 5, initial)
 
+	blockedCalls := 0
 	stubLinkFns(t,
 		func(_, _ string) error {
 			return errors.New("parent failure")
 		},
-		func(_, _ string) error {
-			t.Fatalf("AddBlockedBy should not be called when parent link fails first")
+		func(issue, blocker string) error {
+			blockedCalls++
+			if issue != "5" || blocker != "9" {
+				t.Fatalf("unexpected blocked-by params: issue=%s blocker=%s", issue, blocker)
+			}
 			return nil
 		},
 	)
@@ -448,9 +452,57 @@ func TestRunLinkLeavesFileUntouchedWhenParentLinkFails(t *testing.T) {
 	out, err := captureStdout(t, func() error { return runLink(cmd, []string{"5"}) })
 	expectExitCode(t, err, model.ExitEnv)
 
-	expectedSummary := "link summary: parent=failed blocked_by_added=0/1 partial_success=no\n"
+	if blockedCalls != 1 {
+		t.Fatalf("expected AddBlockedBy to be called once, got %d", blockedCalls)
+	}
+
+	expectedSummary := "link summary: parent=failed blocked_by_added=1/1 partial_success=yes\n"
 	if out != expectedSummary {
 		t.Fatalf("unexpected summary\nexpected:\n%s\nactual:\n%s", expectedSummary, out)
+	}
+
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("failed to read file: %v", readErr)
+	}
+	if string(data) != initial {
+		t.Fatalf("file should remain unchanged after remote failure\nexpected:\n%s\nactual:\n%s", initial, string(data))
+	}
+}
+
+func TestRunLinkAggregatesFailuresAfterTryingBothLinkPaths(t *testing.T) {
+	setupLinkWorkspace(t)
+
+	initial := "---\ntitle: Child title\nextra: keep\n---\nbody"
+	path := writeIssueRaw(t, 5, initial)
+
+	var blockedCalls []string
+	stubLinkFns(t,
+		func(_, _ string) error {
+			return errors.New("parent failure")
+		},
+		func(issue, blocker string) error {
+			blockedCalls = append(blockedCalls, issue+"<-"+blocker)
+			return errors.New("blocked-by failure " + blocker)
+		},
+	)
+
+	cmd := newLinkTestCommand(t, "7", []string{"11", "9"}, nil)
+	out, err := captureStdout(t, func() error { return runLink(cmd, []string{"5"}) })
+	expectExitCode(t, err, model.ExitEnv)
+
+	if len(blockedCalls) != 2 || blockedCalls[0] != "5<-9" || blockedCalls[1] != "5<-11" {
+		t.Fatalf("expected AddBlockedBy to be called for all blockers, got %v", blockedCalls)
+	}
+
+	expectedSummary := "link summary: parent=failed blocked_by_added=0/2 partial_success=no\n"
+	if out != expectedSummary {
+		t.Fatalf("unexpected summary\nexpected:\n%s\nactual:\n%s", expectedSummary, out)
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "parent failure") || !strings.Contains(errMsg, "blocked-by failure 9") || !strings.Contains(errMsg, "blocked-by failure 11") {
+		t.Fatalf("expected aggregated error to include all failures, got: %s", errMsg)
 	}
 
 	data, readErr := os.ReadFile(path)

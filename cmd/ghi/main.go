@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -443,24 +444,30 @@ func runLink(cmd *cobra.Command, args []string) error {
 
 	blockedByAdded := 0
 	anyRemoteSuccess := false
+	remoteErrors := make([]error, 0, 1+len(blockedByToCreate))
 
 	if parentStatus == "pending" {
 		if err := addSubIssueFn(issueNumber, strconv.Itoa(*parent)); err != nil {
 			parentStatus = "failed"
-			fmt.Println(linkSummaryLine(parentStatus, blockedByAdded, len(blockedBy), anyRemoteSuccess))
-			return model.NewEnvError("", err)
+			remoteErrors = append(remoteErrors, fmt.Errorf("failed to add parent link: %w", err))
+		} else {
+			parentStatus = "added"
+			anyRemoteSuccess = true
 		}
-		parentStatus = "added"
-		anyRemoteSuccess = true
 	}
 
 	for _, blocker := range blockedByToCreate {
 		if err := addBlockedByFn(issueNumber, strconv.Itoa(blocker)); err != nil {
-			fmt.Println(linkSummaryLine(parentStatus, blockedByAdded, len(blockedBy), anyRemoteSuccess))
-			return model.NewEnvError("", err)
+			remoteErrors = append(remoteErrors, fmt.Errorf("failed to add blocked-by link #%d: %w", blocker, err))
+			continue
 		}
 		blockedByAdded++
 		anyRemoteSuccess = true
+	}
+
+	if len(remoteErrors) > 0 {
+		fmt.Println(linkSummaryLine(parentStatus, blockedByAdded, len(blockedBy), anyRemoteSuccess))
+		return model.NewEnvError("", errors.Join(remoteErrors...))
 	}
 
 	if parentStatus == "added" {
